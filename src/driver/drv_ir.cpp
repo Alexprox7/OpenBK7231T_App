@@ -566,11 +566,30 @@ extern "C" commandResult_t IR_Send_Cmd(const void *context, const char *cmd, con
     return CMD_RES_ERROR;
 }
 
+static commandResult_t IR_SendRaw_Text(const char *args);
+
 // IRSendRaw [kHz] [mark space mark ...] - raw timings in microseconds, first value is a mark.
 // Separators may be spaces or commas. Sends captures the protocol decoders can't (AC units, Flipper raw files).
+// IRSendRaw @file reads the same text from a LittleFS file (script lines are limited to 255 chars).
 // Example: IRSendRaw 38 9000,4500,560,560,560,1690,560
 extern "C" commandResult_t IR_SendRaw_Cmd(const void *context, const char *cmd, const char *args, int cmdFlags) {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    if (*args != '@') return IR_SendRaw_Text(args);
+    char fname[64];
+    strncpy(fname, args + 1, sizeof(fname) - 1);
+    fname[sizeof(fname) - 1] = 0;
+    for (char *e = fname; *e; e++) if (*e == ' ' || *e == '\r' || *e == '\n') { *e = 0; break; }
+    byte *data = LFS_ReadFile(fname);
+    if (!data) {
+        ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: cannot read %s", fname);
+        return CMD_RES_ERROR;
+    }
+    commandResult_t res = IR_SendRaw_Text((const char *)data);
+    free(data);
+    return res;
+}
+
+static commandResult_t IR_SendRaw_Text(const char *args) {
     if (!pIRsend) {
         ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: no IRSend pin/driver running");
         return CMD_RES_ERROR;
