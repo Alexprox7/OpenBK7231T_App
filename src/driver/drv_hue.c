@@ -214,19 +214,166 @@ static int HUE_GlobalConfig(http_request_t* request) {
 }
 
 
-// http://192.168.0.213/api/username/lights/1/state
-// http://192.168.0.213/description.xml
+// Alexa devices = channels HUE_FIRST_CH..HUE_LAST_CH that have a label and type Toggle (on/off)
+// or Dimmer (on/off + percentage). Scripts react to the channel value with addChangeHandler.
+#define HUE_FIRST_CH 10
+#define HUE_LAST_CH 31
+static int g_hueLast[HUE_LAST_CH + 1]; // last non-zero dimmer value, restored by a plain "turn on"
+static char g_hueMac[24];
+
+static int HUE_IsLight(int ch) {
+	int t;
+	if (ch < HUE_FIRST_CH || ch > HUE_LAST_CH || !CHANNEL_HasLabel(ch))
+		return 0;
+	t = CHANNEL_GetType(ch);
+	return t == ChType_Toggle || t == ChType_Dimmer;
+}
+static int HUE_Bri(int ch) {
+	int v = CHANNEL_Get(ch);
+	if (CHANNEL_GetType(ch) != ChType_Dimmer)
+		return 254;
+	if (v <= 0)
+		v = g_hueLast[ch] > 0 ? g_hueLast[ch] : 100;
+	if (v > 100)
+		v = 100;
+	return (v * 254 + 50) / 100;
+}
+static void HUE_PrintLight(http_request_t* request, int ch) {
+	// same fields as fauxmoESP, which is known to work with Echo devices
+	poststr(request, "{\"type\":\"Extended color light\",\"name\":\"");
+	poststr(request, CHANNEL_GetLabel(ch));
+	hprintf255(request, "\",\"uniqueid\":\"%s:00:00-%02X\",\"modelid\":\"LCT015\",\"manufacturername\":\"Philips\",\"productname\":\"E4\",",
+		g_hueMac, ch);
+	hprintf255(request, "\"state\":{\"on\":%s,\"bri\":%d,\"xy\":[0,0],\"hue\":0,\"sat\":0,\"effect\":\"none\",\"colormode\":\"xy\",\"ct\":500,",
+		CHANNEL_Get(ch) > 0 ? "true" : "false", HUE_Bri(ch));
+	poststr(request, "\"mode\":\"homeautomation\",\"reachable\":true},\"capabilities\":{\"certified\":false,"
+		"\"streaming\":{\"renderer\":true,\"proxy\":false}},\"swversion\":\"5.105.0.21169\"}");
+}
+static void HUE_PrintLights(http_request_t* request) {
+	int ch, first = 1;
+	poststr(request, "{");
+	for (ch = HUE_FIRST_CH; ch <= HUE_LAST_CH; ch++) {
+		if (!HUE_IsLight(ch))
+			continue;
+		hprintf255(request, "%s\"%d\":", first ? "" : ",", ch);
+		HUE_PrintLight(request, ch);
+		first = 0;
+	}
+	poststr(request, "}");
+}
+static void HUE_SetState(http_request_t* request, int ch) {
+	const char *b = request->bodystart ? request->bodystart : "";
+	const char *on = strstr(b, "\"on\"");
+	const char *bri = strstr(b, "\"bri\"");
+	int hasOn = 0, onVal = 0, hasBri = 0, briVal = 0;
+	int v = CHANNEL_Get(ch);
+
+	if (on && (on = strchr(on + 4, ':')) != 0) {
+		on++;
+		while (*on == ' ') on++;
+		hasOn = 1;
+		onVal = !strncmp(on, "true", 4);
+	}
+	if (bri && (bri = strchr(bri + 5, ':')) != 0) {
+		hasBri = 1;
+		briVal = atoi(bri + 1);
+	}
+	if (CHANNEL_GetType(ch) == ChType_Dimmer) {
+		if (hasBri) {
+			v = (briVal * 100 + 127) / 254; // 0..254 -> 0..100, "22%" comes back as 22
+			if (v < 1) v = 1;
+			if (v > 100) v = 100;
+		}
+		else if (hasOn && onVal) {
+			v = g_hueLast[ch] > 0 ? g_hueLast[ch] : 100;
+		}
+		if (hasOn && !onVal)
+			v = 0;
+		if (v > 0)
+			g_hueLast[ch] = v;
+	}
+	else if (hasOn) {
+		v = onVal ? 1 : 0;
+	}
+	addLogAdv(LOG_INFO, LOG_FEATURE_HTTP, "HUE - light %i set to %i (%s)", ch, v, b);
+	CHANNEL_Set(ch, v, 0);
+
+	http_setup(request, httpMimeTypeJson);
+	hprintf255(request, "[{\"success\":{\"/lights/%d/state/on\":%s}}", ch, v > 0 ? "true" : "false");
+	if (hasBri)
+		hprintf255(request, ",{\"success\":{\"/lights/%d/state/bri\":%d}}", ch, HUE_Bri(ch));
+	poststr(request, "]");
+	poststr(request, NULL);
+}
+
+// Called by the HTTP server before its own handlers; returns 1 when the request was a Hue API call.
+// POST /api (pairing), GET /api/<user>, GET /api/<user>/lights[/<id>], PUT /api/<user>/lights/<id>/state
 int HUE_APICall(http_request_t* request) {
+	const char *p, *seg2;
+	int ch;
+
 	if (g_uid == 0) {
 		// not running
 		return 0;
 	}
-	// skip "api/"
-	//const char *api = request->url + 4;
-	//int urlLen = strlen(request->url);
-	// TODO
-
-	return 0;
+	p = request->url;
+	if (strncmp(p, "api", 3))
+		return 0;
+	p += 3;
+	if (*p == 0 || (*p == '/' && p[1] == 0)) {
+		if (request->method != HTTP_POST)
+			return 0;
+		HUE_Authentication(request);
+		return 1;
+	}
+	if (*p != '/')
+		return 0;
+	p++;
+	// OBK's own REST API also lives under /api/, so only claim /api/<user>/lights... (any user name,
+	// Echo devices don't always pair first) and /api/<our user>
+	seg2 = strchr(p, '/');
+	if (seg2 == 0) {
+		if (strcmp(p, g_userID) || request->method != HTTP_GET)
+			return 0;
+		stat_eventsReceived++;
+		http_setup(request, httpMimeTypeJson);
+		poststr(request, "{\"lights\":");
+		HUE_PrintLights(request);
+		poststr(request, ",\"groups\":{},\"schedules\":{},\"config\":");
+		HUE_Config_Internal(request);
+		poststr(request, "}");
+		poststr(request, NULL);
+		return 1;
+	}
+	seg2++;
+	if (strncmp(seg2, "lights", 6) || (seg2[6] != 0 && seg2[6] != '/'))
+		return 0;
+	stat_eventsReceived++;
+	p = seg2 + 6;
+	if (*p == 0 || (*p == '/' && p[1] == 0)) {
+		http_setup(request, httpMimeTypeJson);
+		HUE_PrintLights(request);
+		poststr(request, NULL);
+		return 1;
+	}
+	p++;
+	ch = atoi(p);
+	if (!HUE_IsLight(ch)) {
+		http_setup(request, httpMimeTypeJson);
+		poststr(request, "[{\"error\":{\"type\":3,\"address\":\"/lights\",\"description\":\"resource not available\"}}]");
+		poststr(request, NULL);
+		return 1;
+	}
+	while (*p >= '0' && *p <= '9')
+		p++;
+	if (!strncmp(p, "/state", 6) && request->method == HTTP_PUT) {
+		HUE_SetState(request, ch);
+		return 1;
+	}
+	http_setup(request, httpMimeTypeJson);
+	HUE_PrintLight(request, ch);
+	poststr(request, NULL);
+	return 1;
 }
 // backlog startDriver SSDP; startDriver HUE
 // 
@@ -247,6 +394,7 @@ void HUE_Init() {
 	// uuid
 	snprintf(tmp, sizeof(tmp), "f6543a06-da50-11ba-8d8f-%s", g_serial);
 	g_uid = strdup(tmp);
+	snprintf(g_hueMac, sizeof(g_hueMac), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
 
 	//HTTP_RegisterCallback("/api", HTTP_ANY, HUE_APICall);
