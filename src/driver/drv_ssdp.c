@@ -532,7 +532,9 @@ void DRV_SSDP_RunQuickTick() {
 				|| strcasestr(udp_msgbuf, "ssdpsearch:all")
 				|| strcasestr(udp_msgbuf, "ssdp:all")) {
 				DRV_WEMO_Send_Advert_To(2, &addr);
-				return;
+				// generic searches must also reach Hue, so Wemo and Hue can run together
+				if (!DRV_IsRunning("HUE"))
+					return;
 			}
 		}
 #endif
