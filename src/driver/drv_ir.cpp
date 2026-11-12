@@ -575,16 +575,35 @@ static commandResult_t IR_SendRaw_Text(const char *args);
 extern "C" commandResult_t IR_SendRaw_Cmd(const void *context, const char *cmd, const char *args, int cmdFlags) {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     if (*args != '@') return IR_SendRaw_Text(args);
+    // IRSendRaw @file or @file:N (N = 0-based line, so several codes share one 4 KB LittleFS block)
     char fname[64];
+    int line = -1;
     strncpy(fname, args + 1, sizeof(fname) - 1);
     fname[sizeof(fname) - 1] = 0;
-    for (char *e = fname; *e; e++) if (*e == ' ' || *e == '\r' || *e == '\n') { *e = 0; break; }
+    for (char *e = fname; *e; e++) {
+        if (*e == ' ' || *e == '\r' || *e == '\n') { *e = 0; break; }
+        if (*e == ':') { *e = 0; line = atoi(e + 1); break; }
+    }
     byte *data = LFS_ReadFile(fname);
     if (!data) {
         ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: cannot read %s", fname);
         return CMD_RES_ERROR;
     }
-    commandResult_t res = IR_SendRaw_Text((const char *)data);
+    char *text = (char *)data;
+    if (line >= 0) {
+        for (int i = 0; i < line && text; i++) {
+            text = strchr(text, '\n');
+            if (text) text++;
+        }
+        if (!text || !*text) {
+            ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: %s has no line %d", fname, line);
+            free(data);
+            return CMD_RES_BAD_ARGUMENT;
+        }
+        char *end = strchr(text, '\n');
+        if (end) *end = 0;
+    }
+    commandResult_t res = IR_SendRaw_Text(text);
     free(data);
     return res;
 }
