@@ -605,7 +605,7 @@ static commandResult_t IR_SendRaw_Text(const char *args) {
     int n = 0;
     bool isMark = true;
     while (*p) {
-        while (*p == ' ' || *p == ',' || *p == '\t') p++;
+        while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\r' || *p == '\n') p++; // files may end with a newline
         if (!*p) break;
         char *start = p;
         long us = strtol(p, &p, 10);
