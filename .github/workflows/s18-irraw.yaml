@@ -1,0 +1,25 @@
+# Builds only the BK7231N default firmware (Tuya S18 IR blaster) with the IRSendRaw command.
+name: Build S18 IR raw
+on:
+  push:
+    branches: [ir-raw]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: 1.18.321_irraw
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run make
+        run: make APP_VERSION=$VERSION APP_NAME=OpenBK7231N VARIANT=default OpenBK7231N
+      - name: Save firmware
+        uses: actions/upload-artifact@v6
+        with:
+          name: OpenBK7231N_${{ env.VERSION }}
+          path: |
+            output/${{ env.VERSION }}/OpenBK7231N_${{ env.VERSION }}.rbl
+            output/${{ env.VERSION }}/OpenBK7231N_QIO_${{ env.VERSION }}.bin
+            output/${{ env.VERSION }}/OpenBK7231N_UA_${{ env.VERSION }}.bin
+          if-no-files-found: error

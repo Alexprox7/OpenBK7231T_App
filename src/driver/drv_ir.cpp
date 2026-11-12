@@ -566,6 +566,49 @@ extern "C" commandResult_t IR_Send_Cmd(const void *context, const char *cmd, con
     return CMD_RES_ERROR;
 }
 
+// IRSendRaw [kHz] [mark space mark ...] - raw timings in microseconds, first value is a mark.
+// Separators may be spaces or commas. Sends captures the protocol decoders can't (AC units, Flipper raw files).
+// Example: IRSendRaw 38 9000,4500,560,560,560,1690,560
+extern "C" commandResult_t IR_SendRaw_Cmd(const void *context, const char *cmd, const char *args, int cmdFlags) {
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    if (!pIRsend) {
+        ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: no IRSend pin/driver running");
+        return CMD_RES_ERROR;
+    }
+    char *p;
+    long khz = strtol(args, &p, 10);
+    if (p == args || khz < 20 || khz > 60) {
+        ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: first argument must be the carrier in kHz (20-60)");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    pIRsend->enableIROut((uint_fast8_t)khz);
+    unsigned short overflowsBefore = pIRsend->overflows;
+    int n = 0;
+    bool isMark = true;
+    while (*p) {
+        while (*p == ' ' || *p == ',' || *p == '\t') p++;
+        if (!*p) break;
+        char *start = p;
+        long us = strtol(p, &p, 10);
+        if (p == start || us <= 0 || us > 0xFFFFFF) {
+            ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: bad value at position %d", n);
+            pIRsend->resetsendqueue();
+            return CMD_RES_BAD_ARGUMENT;
+        }
+        if (isMark) pIRsend->mark((unsigned int)us); else pIRsend->space((unsigned int)us);
+        isMark = !isMark;
+        n++;
+    }
+    // same 100ms gap as IRSend, so queued commands don't run into each other
+    pIRsend->delay(100);
+    if (pIRsend->overflows != overflowsBefore) {
+        ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IRSendRaw: %d timings exceed the send queue (%d)", n, SEND_MAXBITS * 2);
+        return CMD_RES_ERROR;
+    }
+    ADDLOG_INFO(LOG_FEATURE_IR, (char *)"IR send raw %d timings at %ldkHz", n, khz);
+    return CMD_RES_OK;
+}
+
 extern "C" commandResult_t IR_Enable(const void *context, const char *cmd, const char *args_in, int cmdFlags) {
     if (!args_in || !args_in[0]) {
         ADDLOG_ERROR(LOG_FEATURE_IR, (char *)"IREnable expects arguments");
@@ -717,6 +760,11 @@ extern "C" void DRV_IR_Init(){
 	//cmddetail:"fn":"IR_Send_Cmd","file":"driver/drv_ir.cpp","requires":"ENABLE_DRIVER_IR (Arduino-IRremote)",
 	//cmddetail:"examples":""}
             CMD_RegisterCommand("IRSend",IR_Send_Cmd, NULL);
+	//cmddetail:{"name":"IRSendRaw","args":"[kHz] [mark space mark ...]",
+	//cmddetail:"descr":"Sends raw IR timings in microseconds (first is a mark), e.g. IRSendRaw 38 9000,4500,560,560,560",
+	//cmddetail:"fn":"IR_SendRaw_Cmd","file":"driver/drv_ir.cpp","requires":"ENABLE_DRIVER_IR (Arduino-IRremote)",
+	//cmddetail:"examples":""}
+            CMD_RegisterCommand("IRSendRaw",IR_SendRaw_Cmd, NULL);
 	//cmddetail:{"name":"IREnable","args":"[Str][1or0]",
 	//cmddetail:"descr":"Enable/disable aspects of IR.  IREnable RXTX 0/1 - enable Rx whilst Tx.  IREnable [protocolname] 0/1 - enable/disable a specified protocol",
 	//cmddetail:"fn":"IR_Enable","file":"driver/drv_ir.cpp","requires":"ENABLE_DRIVER_IR (Arduino-IRremote)",

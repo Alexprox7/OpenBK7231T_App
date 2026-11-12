@@ -1,6 +1,6 @@
 #ifndef __DRV_IR_H__
 #define __DRV_IR_H__
-#define SEND_MAXBITS 128
+#define SEND_MAXBITS 512 // queue of 1024 marks/spaces: room for raw AC frames and Flipper captures
 
 #ifdef __cplusplus
 extern "C" {
